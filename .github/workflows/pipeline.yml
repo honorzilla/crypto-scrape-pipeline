@@ -1,0 +1,28 @@
+name: Daily Crypto ELT Pipeline
+
+on:
+  schedule:
+    # Her gün gece saat 03:00'te (UTC) otomatik çalışır
+    - cron: '0 3 * * *'
+  workflow_dispatch: # Test edebilmemiz için manuel tetikleme butonu ekler
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repodaki Kodu Çek
+        uses: actions/checkout@v3
+
+      - name: Python 3.10 Kur
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Kütüphaneleri Yükle
+        run: pip install -r requirements.txt
+
+      - name: Veri Pipeline'ını Çalıştır
+        env:
+          AWS_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: python pipeline.py
