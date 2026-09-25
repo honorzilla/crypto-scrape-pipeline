@@ -1,45 +1,53 @@
-import requests
+import os
 import boto3
 import json
+import yfinance as yf
 from datetime import datetime
-import os
 
 # ==========================================
 # 1. KİMLİK BİLGİLERİ VE AYARLAR
 # ==========================================
-# Anahtarları artık kodun içine değil, GitHub Secrets ortamına yazacağız
 AWS_ACCESS_KEY = os.environ.get('AWS_ACCESS_KEY')
 AWS_SECRET_KEY = os.environ.get('AWS_SECRET_KEY')
 BUCKET_NAME = 'scrape-data-bucket-330656342602-eu-north-1-an'
 REGION_NAME = 'eu-north-1'
 
 # ==========================================
-# 2. EXTRACT: BİNANCE CANLI KRİPTO VERİSİ
+# 2. EXTRACT: YAHOO FINANCE İLE ÇOKLU PİYASA VERİSİ
 # ==========================================
-def fetch_crypto_prices():
-    print("Binance API'sinden canlı kripto fiyatları çekiliyor...")
-    # Binance API asla bot engeli atmaz, tamamen herkese açıktır.
-    url = "https://api.binance.us/api/v3/ticker/price"
+def fetch_market_data():
+    print("Küresel piyasa verileri çekiliyor...")
+    
+    # Semboller: Kripto, Altın(GC=F), Gümüş(SI=F), S&P500(^GSPC), BIST100(XU100.IS)
+    varliklar = {
+        "Bitcoin": "BTC-USD",
+        "Ethereum": "ETH-USD",
+        "Ons Altın": "GC=F",
+        "Ons Gümüş": "SI=F",
+        "S&P 500 Endeksi": "^GSPC",
+        "BIST 100 Endeksi": "XU100.IS"
+    }
     
     products = []
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        
-        # Piyasayı domine eden 5 ana coini seçiyoruz
-        hedef_coinler = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
-        
-        for item in data:
-            if item['symbol'] in hedef_coinler:
+    
+    for isim, sembol in varliklar.items():
+        try:
+            # yfinance ile varlığın verisini alıyoruz
+            ticker_data = yf.Ticker(sembol)
+            # Son 1 günlük veriyi çekip kapanış fiyatını (Close) alıyoruz
+            hist = ticker_data.history(period="1d")
+            
+            if not hist.empty:
+                fiyat = hist['Close'].iloc[-1]
                 products.append({
-                    "coin_adi": item['symbol'].replace("USDT", ""),
-                    "anlik_fiyat": str(round(float(item['price']), 2)) + " $",
+                    "varlik_adi": isim,
+                    "sembol": sembol,
+                    "anlik_fiyat": f"{round(fiyat, 2)}",
                     "cekilen_tarih": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
-                
-    except Exception as e:
-        print(f"API bağlantı hatası: {e}")
-        
+        except Exception as e:
+            print(f"{isim} ({sembol}) için veri çekilemedi: {e}")
+            
     return products
 
 # ==========================================
@@ -50,10 +58,10 @@ def upload_to_s3(data):
         print("S3'e yüklenecek veri bulunamadı.")
         return
         
-    print(f"\nÇekilen Veri Sayısı: {len(data)}")
-    print(json.dumps(data, indent=2)) # Veriyi ekranda da gör
+    print(f"\nÇekilen Varlık Sayısı: {len(data)}")
+    print(json.dumps(data, indent=2, ensure_ascii=False))
     
-    print("\nKripto verileri AWS S3'e yükleniyor...")
+    print("\nPiyasa verileri AWS S3'e yükleniyor...")
     s3_client = boto3.client(
         's3',
         aws_access_key_id=AWS_ACCESS_KEY,
@@ -62,7 +70,7 @@ def upload_to_s3(data):
     )
     
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
-    file_name = f"kripto_takibi/binance_prices_{date_str}.json"
+    file_name = f"piyasa_takibi/market_data_{date_str}.json"
     
     s3_client.put_object(
         Bucket=BUCKET_NAME,
@@ -73,5 +81,5 @@ def upload_to_s3(data):
     print(f"Başarılı! Veri gölüne yüklendi: s3://{BUCKET_NAME}/{file_name}")
 
 if __name__ == "__main__":
-    scraped_data = fetch_crypto_prices()
+    scraped_data = fetch_market_data()
     upload_to_s3(scraped_data)
