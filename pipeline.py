@@ -19,7 +19,7 @@ REGION_NAME = 'eu-north-1'
 def fetch_crypto_prices():
     print("Binance API'sinden canlı kripto fiyatları çekiliyor...")
     # Binance API asla bot engeli atmaz, tamamen herkese açıktır.
-    url = "https://api.binance.com/api/v3/ticker/price"
+    url = "https://api.binance.us/api/v3/ticker/price"
     
     products = []
     try:
