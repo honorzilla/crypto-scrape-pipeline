@@ -1,10 +1,9 @@
 import os
 import boto3
 import json
-import yfinance as yf
 import requests
+import yfinance as yf
 from datetime import datetime
-
 
 # ==========================================
 # 1. KİMLİK BİLGİLERİ VE AYARLAR
@@ -15,12 +14,12 @@ BUCKET_NAME = 'scrape-data-bucket-330656342602-eu-north-1-an'
 REGION_NAME = 'eu-north-1'
 
 # ==========================================
-# 2. EXTRACT: YAHOO FINANCE İLE ÇOKLU PİYASA VERİSİ
+# 2. EXTRACT: PİYASA VERİSİ ÇEKME
 # ==========================================
 def fetch_market_data():
     print("Küresel piyasa verileri çekiliyor...")
     
-    # Yahoo Finance'in GitHub'ı bot sanmaması için kendimizi gerçek tarayıcı gibi gösteriyoruz
+    # GitHub'ı bot sanmaması için tarayıcı kimliği
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -39,13 +38,11 @@ def fetch_market_data():
     
     for isim, sembol in varliklar.items():
         try:
-            # Session'ı yfinance'e yediriyoruz
             ticker_data = yf.Ticker(sembol, session=session)
             # Hafta sonu boşluğu yememek için son 5 günü çekiyoruz
             hist = ticker_data.history(period="5d")
             
             if not hist.empty:
-                # Son 5 günün içindeki en son (en güncel) fiyatı alıyoruz
                 fiyat = hist['Close'].iloc[-1]
                 products.append({
                     "varlik_adi": isim,
@@ -57,8 +54,9 @@ def fetch_market_data():
             print(f"{isim} ({sembol}) için veri çekilemedi: {e}")
             
     return products
+
 # ==========================================
-# 3. LOAD: BULUTA YÜKLEME (ATHENA İÇİN JSONL FORMATI)
+# 3. LOAD: BULUTA YÜKLEME (ATHENA İÇİN JSONL)
 # ==========================================
 def upload_to_s3(data):
     if not data:
@@ -67,7 +65,7 @@ def upload_to_s3(data):
         
     print(f"\nÇekilen Varlık Sayısı: {len(data)}")
     
-    # Athena'nın okuyabilmesi için veriyi alt alta satırlar (JSONL) haline getiriyoruz
+    # Athena'nın okuyabilmesi için JSONL formatı
     jsonl_data = ""
     for item in data:
         jsonl_data += json.dumps(item, ensure_ascii=False) + "\n"
@@ -90,3 +88,10 @@ def upload_to_s3(data):
         ContentType='application/jsonlines'
     )
     print(f"Başarılı! Veri gölüne yüklendi: s3://{BUCKET_NAME}/{file_name}")
+
+# ==========================================
+# ANA ÇALIŞTIRMA BLOĞU (SİLİNEN KISIM)
+# ==========================================
+if __name__ == "__main__":
+    scraped_data = fetch_market_data()
+    upload_to_s3(scraped_data)
