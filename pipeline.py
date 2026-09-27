@@ -2,7 +2,9 @@ import os
 import boto3
 import json
 import yfinance as yf
+import requests
 from datetime import datetime
+
 
 # ==========================================
 # 1. KİMLİK BİLGİLERİ VE AYARLAR
@@ -18,7 +20,12 @@ REGION_NAME = 'eu-north-1'
 def fetch_market_data():
     print("Küresel piyasa verileri çekiliyor...")
     
-    # Semboller: Kripto, Altın(GC=F), Gümüş(SI=F), S&P500(^GSPC), BIST100(XU100.IS)
+    # Yahoo Finance'in GitHub'ı bot sanmaması için kendimizi gerçek tarayıcı gibi gösteriyoruz
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    
     varliklar = {
         "Bitcoin": "BTC-USD",
         "Ethereum": "ETH-USD",
@@ -32,24 +39,24 @@ def fetch_market_data():
     
     for isim, sembol in varliklar.items():
         try:
-            # yfinance ile varlığın verisini alıyoruz
-            ticker_data = yf.Ticker(sembol)
-            # Son 1 günlük veriyi çekip kapanış fiyatını (Close) alıyoruz
-            hist = ticker_data.history(period="1d")
+            # Session'ı yfinance'e yediriyoruz
+            ticker_data = yf.Ticker(sembol, session=session)
+            # Hafta sonu boşluğu yememek için son 5 günü çekiyoruz
+            hist = ticker_data.history(period="5d")
             
             if not hist.empty:
+                # Son 5 günün içindeki en son (en güncel) fiyatı alıyoruz
                 fiyat = hist['Close'].iloc[-1]
                 products.append({
                     "varlik_adi": isim,
                     "sembol": sembol,
-                    "anlik_fiyat": f"{round(fiyat, 2)}",
+                    "anlik_fiyat": str(round(float(fiyat), 2)),
                     "cekilen_tarih": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
         except Exception as e:
             print(f"{isim} ({sembol}) için veri çekilemedi: {e}")
             
     return products
-
 # ==========================================
 # 3. LOAD: BULUTA YÜKLEME (ATHENA İÇİN JSONL FORMATI)
 # ==========================================
