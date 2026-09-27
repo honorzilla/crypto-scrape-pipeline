@@ -51,7 +51,7 @@ def fetch_market_data():
     return products
 
 # ==========================================
-# 3. LOAD: BULUTA YÜKLEME
+# 3. LOAD: BULUTA YÜKLEME (ATHENA İÇİN JSONL FORMATI)
 # ==========================================
 def upload_to_s3(data):
     if not data:
@@ -59,7 +59,11 @@ def upload_to_s3(data):
         return
         
     print(f"\nÇekilen Varlık Sayısı: {len(data)}")
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+    
+    # Athena'nın okuyabilmesi için veriyi alt alta satırlar (JSONL) haline getiriyoruz
+    jsonl_data = ""
+    for item in data:
+        jsonl_data += json.dumps(item, ensure_ascii=False) + "\n"
     
     print("\nPiyasa verileri AWS S3'e yükleniyor...")
     s3_client = boto3.client(
@@ -75,11 +79,7 @@ def upload_to_s3(data):
     s3_client.put_object(
         Bucket=BUCKET_NAME,
         Key=file_name,
-        Body=json.dumps(data, ensure_ascii=False, indent=4),
-        ContentType='application/json'
+        Body=jsonl_data,
+        ContentType='application/jsonlines'
     )
     print(f"Başarılı! Veri gölüne yüklendi: s3://{BUCKET_NAME}/{file_name}")
-
-if __name__ == "__main__":
-    scraped_data = fetch_market_data()
-    upload_to_s3(scraped_data)
