@@ -71,11 +71,11 @@ def fetch_market_data():
     return records, telegram_mesaji
 
 # ==========================================
-# 3. LOAD: MEDALLION MIMARISI (RAW & SILVER)
+# 3. LOAD: MEDALLION MIMARISI (BRONZE & SILVER)
 # ==========================================
 def save_to_medallion_lake(data, s3_client):
     if not data:
-        return
+        return None
 
     now_utc = datetime.utcnow()
     yil = str(now_utc.year)
@@ -83,7 +83,7 @@ def save_to_medallion_lake(data, s3_client):
     gun = f"{now_utc.day:02d}"
     timestamp_tag = now_utc.strftime("%Y%m%d_%H%M%S")
 
-    # --- 1. BRONZE (RAW) KATMANI: Ham JSONL Arşivi ---
+    # --- BRONZE (RAW) ---
     bronze_key = f"bronze/year={yil}/month={ay}/day={gun}/raw_market_{timestamp_tag}.json"
     jsonl_data = "\n".join([json.dumps(r, ensure_ascii=False) for r in data]) + "\n"
     s3_client.put_object(
@@ -92,7 +92,7 @@ def save_to_medallion_lake(data, s3_client):
     )
     print(f"✅ [Bronze/Raw] yüklendi: s3://{BUCKET_NAME}/{bronze_key}")
 
-    # --- 2. SILVER (CLEANED) KATMANI: Tipli & Partitioned Parquet ---
+    # --- SILVER (CLEANED) ---
     df = pd.DataFrame(data)
     df['anlik_fiyat'] = df['anlik_fiyat'].astype(float)
     df['gunluk_degisim_yuzdesi'] = df['gunluk_degisim_yuzdesi'].astype(float)
@@ -109,26 +109,85 @@ def save_to_medallion_lake(data, s3_client):
     )
     print(f"✅ [Silver/Parquet] yüklendi: s3://{BUCKET_NAME}/{silver_key}")
 
+    return df
+
 # ==========================================
-# 4. ATHENA PARTITION OTOMASYONU
+# 4. GOLD KATMANI (ANALYTICS & AGGREGATIONS)
+# ==========================================
+def generate_and_save_gold_layer(df_silver, s3_client):
+    if df_silver is None or df_silver.empty:
+        return
+
+    print("Gold analitik metrikleri (7D SMA) hesaplanıyor...")
+    now_utc = datetime.utcnow()
+    yil = str(now_utc.year)
+    ay = f"{now_utc.month:02d}"
+    gun = f"{now_utc.day:02d}"
+    timestamp_tag = now_utc.strftime("%Y%m%d_%H%M%S")
+
+    gold_records = []
+    # Her varlık için analitik metrik hesapla
+    for sembol, grup in df_silver.groupby('sembol'):
+        anlik = grup['anlik_fiyat'].iloc[-1]
+        
+        # Yahoo Finance'ten son 7 günlük kapanışları alarak gerçek 7D SMA hesaplayalım
+        try:
+            ticker = yf.Ticker(sembol)
+            hist7 = ticker.history(period="7d")['Close']
+            sma_7 = float(hist7.mean()) if not hist7.empty else anlik
+        except Exception:
+            sma_7 = anlik
+
+        sapma = ((anlik - sma_7) / sma_7) * 100 if sma_7 > 0 else 0.0
+
+        gold_records.append({
+            "kategori": grup['kategori'].iloc[-1],
+            "varlik_adi": grup['varlik_adi'].iloc[-1],
+            "sembol": sembol,
+            "anlik_fiyat": round(anlik, 4),
+            "sma_7": round(sma_7, 4),
+            "sma_7_sapma_yuzdesi": round(sapma, 2),
+            "hesaplama_tarihi": pd.to_datetime(now_utc.strftime("%Y-%m-%d %H:%M:%S"))
+        })
+
+    df_gold = pd.DataFrame(gold_records)
+    gold_key = f"gold/yil={yil}/ay={ay}/gun={gun}/gold_analytics_{timestamp_tag}.parquet"
+    
+    parquet_buffer = io.BytesIO()
+    df_gold.to_parquet(parquet_buffer, engine='pyarrow', compression='snappy', index=False)
+
+    s3_client.put_object(
+        Bucket=BUCKET_NAME, Key=gold_key,
+        Body=parquet_buffer.getvalue(), ContentType='application/octet-stream'
+    )
+    print(f"✅ [Gold/Analytics] yüklendi: s3://{BUCKET_NAME}/{gold_key}")
+
+# ==========================================
+# 5. ATHENA PARTITION ONARIMI
 # ==========================================
 def repair_athena_partitions():
-    print("Athena partition tablosu güncelleniyor...")
+    print("Athena partition tabloları güncelleniyor...")
     athena_client = boto3.client(
         'athena',
         aws_access_key_id=AWS_ACCESS_KEY,
         aws_secret_access_key=AWS_SECRET_KEY,
         region_name=REGION_NAME
     )
-    response = athena_client.start_query_execution(
-        QueryString="MSCK REPAIR TABLE silver_gunluk_fiyatlar;",
-        QueryExecutionContext={'Database': 'piyasa_verileri'},
-        ResultConfiguration={'OutputLocation': f"s3://{BUCKET_NAME}/athena-sonuclari/"},
-        WorkGroup='primary'
-    )
-    print(f"✅ Athena MSCK REPAIR başlatıldı. Query ID: {response['QueryExecutionId']}")
+    # Hem Silver hem Gold tablosunu onar
+    for table in ["silver_gunluk_fiyatlar", "gold_gunluk_metrikler"]:
+        try:
+            athena_client.start_query_execution(
+                QueryString=f"MSCK REPAIR TABLE {table};",
+                QueryExecutionContext={'Database': 'piyasa_verileri'},
+                ResultConfiguration={'OutputLocation': f"s3://{BUCKET_NAME}/athena-sonuclari/"},
+                WorkGroup='primary'
+            )
+            print(f"✅ Athena MSCK REPAIR başlatıldı: {table}")
+        except Exception as e:
+            print(f"⚠️️ {table} partition onarım uyarısı: {e}")
+
 # ==========================================
-# 5. TELEGRAM BİLDİRİMİ
+# 6. TELEGRAM BİLDİRİMİ
 # ==========================================
 def notify_telegram(mesaj):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
@@ -136,7 +195,7 @@ def notify_telegram(mesaj):
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "Markdown"})
 
 # ==========================================
-# 6. ANA ÇALIŞTIRMA BLOĞU
+# 7. ANA ÇALIŞTIRMA BLOĞU
 # ==========================================
 if __name__ == "__main__":
     records, mesaj = fetch_market_data()
@@ -146,6 +205,7 @@ if __name__ == "__main__":
         aws_secret_access_key=AWS_SECRET_KEY,
         region_name=REGION_NAME
     )
-    save_to_medallion_lake(records, s3)
+    df_silver = save_to_medallion_lake(records, s3)
+    generate_and_save_gold_layer(df_silver, s3)
     repair_athena_partitions()
     notify_telegram(mesaj)
