@@ -123,10 +123,10 @@ def repair_athena_partitions():
     response = athena_client.start_query_execution(
         QueryString="MSCK REPAIR TABLE silver_gunluk_fiyatlar;",
         QueryExecutionContext={'Database': 'piyasa_verileri'},
-        ResultConfiguration={'OutputLocation': f"s3://{BUCKET_NAME}/athena-sonuclari/"}
+        ResultConfiguration={'OutputLocation': f"s3://{BUCKET_NAME}/athena-sonuclari/"},
+        WorkGroup='primary'
     )
     print(f"✅ Athena MSCK REPAIR başlatıldı. Query ID: {response['QueryExecutionId']}")
-
 # ==========================================
 # 5. TELEGRAM BİLDİRİMİ
 # ==========================================
