@@ -60,7 +60,6 @@ def fetch_market_data():
                         "anlik_fiyat": round(bugun, 4),
                         "gunluk_degisim_yuzdesi": round(degisim, 2),
                         "cekilen_tarih": tarih_str,
-                        # Partitioning anahtarları
                         "yil": str(now_utc.year),
                         "ay": f"{now_utc.month:02d}",
                         "gun": f"{now_utc.day:02d}"
@@ -95,33 +94,58 @@ def save_to_medallion_lake(data, s3_client):
 
     # --- 2. SILVER (CLEANED) KATMANI: Tipli & Partitioned Parquet ---
     df = pd.DataFrame(data)
-    # Doğru tip atamaları
     df['anlik_fiyat'] = df['anlik_fiyat'].astype(float)
     df['gunluk_degisim_yuzdesi'] = df['gunluk_degisim_yuzdesi'].astype(float)
     df['cekilen_tarih'] = pd.to_datetime(df['cekilen_tarih'])
 
-    # S3'te Hive Partition yolu: silver/yil=YYYY/ay=MM/gun=DD/
     silver_key = f"silver/yil={yil}/ay={ay}/gun={gun}/market_{timestamp_tag}.parquet"
-    
-    # Parquet'yi doğrudan bellekte (in-memory) üretip S3'e aktarma
     parquet_buffer = io.BytesIO()
-    # Partition sütunlarını dosya içinden çıkarıyoruz (çünkü dizin yolunda yer alıyorlar)
     cols_to_save = ['kategori', 'varlik_adi', 'sembol', 'anlik_fiyat', 'gunluk_degisim_yuzdesi', 'cekilen_tarih']
     df[cols_to_save].to_parquet(parquet_buffer, engine='pyarrow', compression='snappy', index=False)
-    
+
     s3_client.put_object(
         Bucket=BUCKET_NAME, Key=silver_key,
         Body=parquet_buffer.getvalue(), ContentType='application/octet-stream'
     )
     print(f"✅ [Silver/Parquet] yüklendi: s3://{BUCKET_NAME}/{silver_key}")
 
+# ==========================================
+# 4. ATHENA PARTITION OTOMASYONU
+# ==========================================
+def repair_athena_partitions():
+    print("Athena partition tablosu güncelleniyor...")
+    athena_client = boto3.client(
+        'athena',
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY,
+        region_name=REGION_NAME
+    )
+    response = athena_client.start_query_execution(
+        QueryString="MSCK REPAIR TABLE silver_gunluk_fiyatlar;",
+        QueryExecutionContext={'Database': 'piyasa_verileri'},
+        ResultConfiguration={'OutputLocation': f"s3://{BUCKET_NAME}/athena-sonuclari/"}
+    )
+    print(f"✅ Athena MSCK REPAIR başlatıldı. Query ID: {response['QueryExecutionId']}")
+
+# ==========================================
+# 5. TELEGRAM BİLDİRİMİ
+# ==========================================
 def notify_telegram(mesaj):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "Markdown"})
 
+# ==========================================
+# 6. ANA ÇALIŞTIRMA BLOĞU
+# ==========================================
 if __name__ == "__main__":
     records, mesaj = fetch_market_data()
-    s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY, aws_secret_access_key=AWS_SECRET_KEY, region_name=REGION_NAME)
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY,
+        region_name=REGION_NAME
+    )
     save_to_medallion_lake(records, s3)
+    repair_athena_partitions()
     notify_telegram(mesaj)
