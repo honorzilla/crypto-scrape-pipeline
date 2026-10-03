@@ -71,7 +71,49 @@ def fetch_market_data():
     return records, telegram_mesaji
 
 # ==========================================
-# 3. LOAD: MEDALLION MIMARISI (BRONZE & SILVER)
+# 3. DATA QUALITY (VERİ DOĞRULAMA & DENETİM)
+# ==========================================
+def validate_market_data(records):
+    print("Veri kalitesi ve sınır kontrolleri (Data Quality Checks) yapılıyor...")
+    valid_records = []
+    anomaliler = []
+
+    for r in records:
+        fiyat = r.get("anlik_fiyat")
+        degisim = r.get("gunluk_degisim_yuzdesi")
+        sembol = r.get("sembol")
+
+        # Kural 1: Boş değer olamaz ve fiyat pozitif olmalı
+        if fiyat is None or fiyat <= 0:
+            anomaliler.append(f"{sembol}: Geçersiz fiyat ({fiyat})")
+            continue
+
+        # Kural 2: Aşırı uç değer anomalisi kontrolü (-90% ile +500% arası makul kabul edilir)
+        if degisim is None or degisim < -90 or degisim > 500:
+            anomaliler.append(f"{sembol}: Anormal günlük değişim (%{degisim})")
+            continue
+
+        # Kural 3: Zorunlu alan kontrolü
+        if not r.get("kategori") or not sembol:
+            anomaliler.append(f"Eksik meta veri: {r}")
+            continue
+
+        valid_records.append(r)
+
+    if anomaliler:
+        print(f"⚠️ Toplam {len(anomaliler)} adet anomali/hatalı kayıt ayıklandı:")
+        for anomali in anomaliler:
+            print(f"   - {anomali}")
+        # Telegram'a kalite uyarısı fırlat
+        uyari_metni = "⚠️️ *Veri Kalitesi Uyarısı (Data Quality Alert)*\n\n" + "\n".join([f"• {a}" for a in anomaliler])
+        notify_telegram(uyari_metni)
+    else:
+        print("✅ Tüm veri kalitesi testleri başarıyla geçti (%100 temiz).")
+
+    return valid_records
+
+# ==========================================
+# 4. LOAD: MEDALLION MIMARISI (BRONZE & SILVER)
 # ==========================================
 def save_to_medallion_lake(data, s3_client):
     if not data:
@@ -83,7 +125,7 @@ def save_to_medallion_lake(data, s3_client):
     gun = f"{now_utc.day:02d}"
     timestamp_tag = now_utc.strftime("%Y%m%d_%H%M%S")
 
-    # --- BRONZE (RAW) ---
+    # --- BRONZE (RAW): Ham haliyle arşivlenir (Audit log) ---
     bronze_key = f"bronze/year={yil}/month={ay}/day={gun}/raw_market_{timestamp_tag}.json"
     jsonl_data = "\n".join([json.dumps(r, ensure_ascii=False) for r in data]) + "\n"
     s3_client.put_object(
@@ -92,7 +134,7 @@ def save_to_medallion_lake(data, s3_client):
     )
     print(f"✅ [Bronze/Raw] yüklendi: s3://{BUCKET_NAME}/{bronze_key}")
 
-    # --- SILVER (CLEANED) ---
+    # --- SILVER (CLEANED & VALIDATED): Sadece doğrulanmış veri girer ---
     df = pd.DataFrame(data)
     df['anlik_fiyat'] = df['anlik_fiyat'].astype(float)
     df['gunluk_degisim_yuzdesi'] = df['gunluk_degisim_yuzdesi'].astype(float)
@@ -112,7 +154,7 @@ def save_to_medallion_lake(data, s3_client):
     return df
 
 # ==========================================
-# 4. GOLD KATMANI (ANALYTICS & AGGREGATIONS)
+# 5. GOLD KATMANI (ANALYTICS & AGGREGATIONS)
 # ==========================================
 def generate_and_save_gold_layer(df_silver, s3_client):
     if df_silver is None or df_silver.empty:
@@ -126,11 +168,8 @@ def generate_and_save_gold_layer(df_silver, s3_client):
     timestamp_tag = now_utc.strftime("%Y%m%d_%H%M%S")
 
     gold_records = []
-    # Her varlık için analitik metrik hesapla
     for sembol, grup in df_silver.groupby('sembol'):
         anlik = grup['anlik_fiyat'].iloc[-1]
-        
-        # Yahoo Finance'ten son 7 günlük kapanışları alarak gerçek 7D SMA hesaplayalım
         try:
             ticker = yf.Ticker(sembol)
             hist7 = ticker.history(period="7d")['Close']
@@ -163,7 +202,7 @@ def generate_and_save_gold_layer(df_silver, s3_client):
     print(f"✅ [Gold/Analytics] yüklendi: s3://{BUCKET_NAME}/{gold_key}")
 
 # ==========================================
-# 5. ATHENA PARTITION ONARIMI
+# 6. ATHENA PARTITION ONARIMI
 # ==========================================
 def repair_athena_partitions():
     print("Athena partition tabloları güncelleniyor...")
@@ -173,7 +212,6 @@ def repair_athena_partitions():
         aws_secret_access_key=AWS_SECRET_KEY,
         region_name=REGION_NAME
     )
-    # Hem Silver hem Gold tablosunu onar
     for table in ["silver_gunluk_fiyatlar", "gold_gunluk_metrikler"]:
         try:
             athena_client.start_query_execution(
@@ -184,10 +222,10 @@ def repair_athena_partitions():
             )
             print(f"✅ Athena MSCK REPAIR başlatıldı: {table}")
         except Exception as e:
-            print(f"⚠️️ {table} partition onarım uyarısı: {e}")
+            print(f"⚠ {table} partition onarım uyarısı: {e}")
 
 # ==========================================
-# 6. TELEGRAM BİLDİRİMİ
+# 7. TELEGRAM BİLDİRİMİ
 # ==========================================
 def notify_telegram(mesaj):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
@@ -195,17 +233,25 @@ def notify_telegram(mesaj):
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "Markdown"})
 
 # ==========================================
-# 7. ANA ÇALIŞTIRMA BLOĞU
+# 8. ANA ÇALIŞTIRMA BLOĞU
 # ==========================================
 if __name__ == "__main__":
-    records, mesaj = fetch_market_data()
+    raw_records, mesaj = fetch_market_data()
+    
+    # 1. Ham veriyi doğrula ve temizle (Data Quality)
+    clean_records = validate_market_data(raw_records)
+    
     s3 = boto3.client(
         's3',
         aws_access_key_id=AWS_ACCESS_KEY,
         aws_secret_access_key=AWS_SECRET_KEY,
         region_name=REGION_NAME
     )
-    df_silver = save_to_medallion_lake(records, s3)
+    
+    # 2. Medallion katmanlarına yaz
+    df_silver = save_to_medallion_lake(clean_records, s3)
     generate_and_save_gold_layer(df_silver, s3)
+    
+    # 3. Kataloğu güncelle & Telegram'a özet geç
     repair_athena_partitions()
     notify_telegram(mesaj)
